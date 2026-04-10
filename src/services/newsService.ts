@@ -1,49 +1,29 @@
-// Real-time AI News Fetcher with Serper API
-// Comprehensive AI news from multiple sources
+// Real-time AI News Fetcher with Automatic Failover
+// Priority: Serper API → Multiple RSS Feeds → Cached Data
 
 const SERPER_API_KEY = '0743b59251e81024cf34d3b21bdbedc67a2a6bb3';
 
-const NEWS_SOURCES = {
-  OPENAI: {
-    name: 'OpenAI',
-    blog: 'https://openai.com/blog/rss.xml',
-    news: 'https://openai.com/news/rss.xml'
-  },
-  GOOGLE_DEEPMIND: {
-    name: 'Google DeepMind',
-    blog: 'https://deepmind.google/blog/rss.xml',
-    research: 'https://deepmind.google/blog/feed/basic/'
-  },
-  META_AI: {
-    name: 'Meta AI',
-    blog: 'https://ai.meta.com/blog/rss/'
-  },
-  MICROSOFT: {
-    name: 'Microsoft AI',
-    blog: 'https://microsoft.ai/news/rss/'
-  },
-  ANTHROPIC: {
-    name: 'Anthropic',
-    blog: 'https://www.anthropic.com/news/rss'
-  },
-  HUGGING_FACE: {
-    name: 'Hugging Face',
-    blog: 'https://huggingface.co/blog/feed.xml'
-  }
-};
+// Multiple RSS Feed Sources (Free backup)
+const RSS_FEEDS = [
+  'https://techcrunch.com/category/artificial-intelligence/feed/',
+  'https://www.theverge.com/rss/ai-artificial-intelligence/index.xml',
+  'https://openai.com/blog/rss.xml',
+  'https://deepmind.google/blog/rss.xml',
+  'https://ai.meta.com/blog/rss/',
+  'https://huggingface.co/blog/feed.xml',
+  'https://venturebeat.com/category/ai/feed/',
+];
 
-// Search queries for comprehensive AI coverage
+// Multiple search queries for Serper
 const SEARCH_QUERIES = [
-  'latest artificial intelligence news 2026',
-  'OpenAI GPT news today',
+  'artificial intelligence news 2026',
+  'OpenAI GPT latest news',
   'Google DeepMind Gemini AI',
-  'Meta AI Llama news',
+  'Meta AI Llama updates',
   'Anthropic Claude news',
   'Microsoft Copilot AI',
   'AI startup funding 2026',
-  'AI research breakthroughs',
-  'AI tools launch 2026',
-  'machine learning news'
+  'machine learning breakthroughs',
 ];
 
 interface NewsItem {
@@ -54,6 +34,11 @@ interface NewsItem {
   date: string;
 }
 
+// Cache for offline fallback
+let cachedNews: NewsItem[] = [];
+let lastFetchTime = 0;
+const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+
 // Search using Serper API
 async function searchSerper(query: string): Promise<any[]> {
   try {
@@ -63,47 +48,111 @@ async function searchSerper(query: string): Promise<any[]> {
         'Content-Type': 'application/json',
         'X-API-KEY': SERPER_API_KEY
       },
-      body: JSON.stringify({
-        q: query,
-        num: 10,
-        autocorrect: true
-      })
+      body: JSON.stringify({ q: query, num: 10 })
     });
 
-    if (!response.ok) {
-      console.error(`Serper API error for "${query}":`, response.status);
-      return [];
-    }
-
+    if (!response.ok) return [];
     const data = await response.json();
     return data.newsResults || [];
-  } catch (error) {
-    console.error(`Error searching "${query}":`, error);
+  } catch {
     return [];
   }
 }
 
-// Fetch RSS feed and parse (fallback)
+// Fetch from RSS (no API key needed)
 async function fetchRSS(feedUrl: string): Promise<any[]> {
   try {
-    const response = await fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(feedUrl)}`);
+    const response = await fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(feedUrl)}&api_key=`);
     if (!response.ok) return [];
     const data = await response.json();
     return data.items || [];
-  } catch (error) {
-    console.error(`Error fetching RSS ${feedUrl}:`, error);
+  } catch {
     return [];
   }
 }
 
-// Main function to fetch all AI news
+// Alternative RSS fetch without API key
+async function fetchRSSDirect(feedUrl: string): Promise<any[]> {
+  try {
+    const response = await fetch(feedUrl, {
+      headers: { 'User-Agent': 'AI-News-Live/1.0' }
+    });
+    if (!response.ok) return [];
+
+    const text = await response.text();
+    return parseRSSSimple(text);
+  } catch {
+    return [];
+  }
+}
+
+// Simple RSS parser
+function parseRSSSimple(xml: string): any[] {
+  const items: any[] = [];
+  const itemMatches = xml.match(/<item[^>]*>[\s\S]*?<\/item>/gi) || [];
+
+  itemMatches.forEach(item => {
+    const getTag = (tag: string) => {
+      const match = item.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+      return match ? match[1].trim() : '';
+    };
+
+    const title = getTag('title');
+    const link = getTag('link');
+    const description = getTag('description') || getTag('content:encoded');
+    const pubDate = getTag('pubDate');
+
+    if (title && link) {
+      items.push({
+        title: title.replace(/<!\[CDATA\[|\]\]>/gi, ''),
+        link,
+        description: description.replace(/<[^>]+>/g, '').substring(0, 300),
+        pubDate: pubDate || new Date().toISOString()
+      });
+    }
+  });
+
+  return items;
+}
+
+// Extract source name from URL
+function extractSource(url: string): string {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    const sources: Record<string, string> = {
+      'techcrunch.com': 'TechCrunch',
+      'theverge.com': 'The Verge',
+      'openai.com': 'OpenAI',
+      'deepmind.google': 'Google DeepMind',
+      'ai.meta.com': 'Meta AI',
+      'microsoft': 'Microsoft',
+      'anthropic.com': 'Anthropic',
+      'huggingface.co': 'Hugging Face',
+      'venturebeat.com': 'VentureBeat',
+      'wired.com': 'Wired',
+      'arstechnica.com': 'Ars Technica',
+      'bloomberg.com': 'Bloomberg',
+      'forbes.com': 'Forbes',
+    };
+
+    for (const [domain, name] of Object.entries(sources)) {
+      if (hostname.includes(domain)) return name;
+    }
+    return hostname.replace('www.', '').split('.')[0];
+  } catch {
+    return 'AI News';
+  }
+}
+
+// Main function with automatic failover
 export async function fetchAINews(): Promise<NewsItem[]> {
   const allNews: NewsItem[] = [];
   const seenUrls = new Set<string>();
 
-  console.log('Fetching AI news from Serper API...');
+  console.log('=== Fetching AI News ===');
 
-  // Search all queries with Serper
+  // Strategy 1: Try Serper API
+  console.log('Trying Serper API...');
   for (const query of SEARCH_QUERIES) {
     try {
       const results = await searchSerper(query);
@@ -113,83 +162,94 @@ export async function fetchAINews(): Promise<NewsItem[]> {
           seenUrls.add(item.link);
           allNews.push({
             title: item.title || '',
-            summary: item.snippet || item.description || '',
+            summary: (item.snippet || item.description || '').substring(0, 300),
             link: item.link,
-            source: item.source || extractSource(item.link) || 'AI News',
+            source: item.source || extractSource(item.link),
             date: item.date || new Date().toISOString()
           });
         }
       });
 
-      // Small delay to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 200));
-    } catch (error) {
-      console.error(`Error with query "${query}":`, error);
+      await new Promise(resolve => setTimeout(resolve, 150));
+    } catch (e) {
+      console.log(`Query failed: ${query}`);
     }
   }
 
-  // If Serper returns nothing, fallback to Google News RSS
-  if (allNews.length === 0) {
-    console.log('Falling back to Google News RSS...');
-    try {
-      const rssUrl = 'https://news.google.com/rss/search?q=artificial+intelligence+AI&hl=en-US&gl=US&ceid=US:en';
-      const rssResults = await fetchRSS(rssUrl);
+  // Strategy 2: If Serper failed or returned few results, use RSS feeds
+  if (allNews.length < 5) {
+    console.log(`Serper returned only ${allNews.length} results, using RSS fallback...`);
 
-      rssResults.forEach((item: any) => {
-        if (item.title && item.link && !seenUrls.has(item.link)) {
-          seenUrls.add(item.link);
-          allNews.push({
-            title: item.title,
-            summary: item.description || '',
-            link: item.link,
-            source: extractSource(item.link) || 'Google News',
-            date: item.pubDate || item.isoDate || new Date().toISOString()
-          });
-        }
-      });
-    } catch (error) {
-      console.error('RSS fallback error:', error);
+    for (const feed of RSS_FEEDS) {
+      try {
+        const items = await fetchRSSDirect(feed);
+
+        items.forEach((item: any) => {
+          if (item.link && !seenUrls.has(item.link)) {
+            seenUrls.add(item.link);
+            allNews.push({
+              title: item.title || '',
+              summary: item.description || '',
+              link: item.link,
+              source: extractSource(item.link),
+              date: item.pubDate || new Date().toISOString()
+            });
+          }
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 200));
+      } catch (e) {
+        console.log(`RSS failed: ${feed.substring(0, 50)}`);
+      }
     }
   }
 
-  // Sort by date (newest first)
+  // Strategy 3: Use cached data if still no results
+  if (allNews.length < 3) {
+    console.log('Using cached news data...');
+    return cachedNews.length > 0 ? cachedNews : generateDefaultNews();
+  }
+
+  // Sort and deduplicate
   allNews.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
-  // Remove duplicates based on title similarity
   const unique = allNews.filter((item, index, self) =>
     index === self.findIndex(t =>
       t.title.substring(0, 50) === item.title.substring(0, 50)
     )
   );
 
-  console.log(`Found ${unique.length} unique AI news articles`);
+  // Cache the results
+  cachedNews = unique.slice(0, 30);
+  lastFetchTime = Date.now();
+
+  console.log(`=== Found ${unique.length} unique articles ===`);
   return unique.slice(0, 30);
 }
 
-function extractSource(url: string): string {
-  try {
-    const hostname = new URL(url).hostname.toLowerCase();
-    if (hostname.includes('techcrunch')) return 'TechCrunch';
-    if (hostname.includes('theverge')) return 'The Verge';
-    if (hostname.includes('openai')) return 'OpenAI';
-    if (hostname.includes('deepmind') || hostname.includes('google')) return 'Google DeepMind';
-    if (hostname.includes('meta')) return 'Meta AI';
-    if (hostname.includes('microsoft')) return 'Microsoft';
-    if (hostname.includes('anthropic')) return 'Anthropic';
-    if (hostname.includes('wired')) return 'Wired';
-    if (hostname.includes('arstechnica')) return 'Ars Technica';
-    if (hostname.includes('bloomberg')) return 'Bloomberg';
-    if (hostname.includes('reuters')) return 'Reuters';
-    if (hostname.includes('bbc')) return 'BBC';
-    if (hostname.includes('cnn')) return 'CNN';
-    if (hostname.includes('venturebeat')) return 'VentureBeat';
-    if (hostname.includes('forbes')) return 'Forbes';
-    if (hostname.includes('business')) return 'Business Insider';
-    if (hostname.includes('venture')) return 'VentureBeat';
-    return hostname.replace('www.', '').split('.')[0];
-  } catch {
-    return 'AI News';
-  }
+// Generate default news if everything fails
+function generateDefaultNews(): NewsItem[] {
+  return [
+    {
+      title: 'AI News Loading...',
+      summary: 'Fetching latest AI news from multiple sources. Please refresh the page.',
+      link: 'https://techcrunch.com/category/artificial-intelligence/',
+      source: 'TechCrunch',
+      date: new Date().toISOString()
+    },
+    {
+      title: 'OpenAI News',
+      summary: 'Visit OpenAI blog for the latest updates on GPT and AI research.',
+      link: 'https://openai.com/blog',
+      source: 'OpenAI',
+      date: new Date().toISOString()
+    },
+    {
+      title: 'Google DeepMind Research',
+      summary: 'Latest breakthroughs from Google DeepMind in AI and machine learning.',
+      link: 'https://deepmind.google/blog',
+      source: 'Google DeepMind',
+      date: new Date().toISOString()
+    }
+  ];
 }
-
-export { NEWS_SOURCES };
